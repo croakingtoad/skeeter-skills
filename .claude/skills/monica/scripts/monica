@@ -80,6 +80,13 @@ def paginate(cfg, path, params=None):
 def out(obj):
     print(json.dumps(obj, ensure_ascii=False))
 
+def parse_json_arg(s):
+    """Parse a user-supplied --json argument; exit cleanly (no traceback) on bad input."""
+    try:
+        return json.loads(s)
+    except ValueError as e:
+        fail("invalid JSON in --json argument: %s" % e)
+
 # Full field set required by PUT /contacts/{id} (UpdateContact::rules() in Monica v4):
 # first_name(req), middle_name, last_name, nickname, gender_id, description,
 # is_birthdate_known(req) + birthdate_day/month/year + birthdate_is_age_based + birthdate_age,
@@ -91,7 +98,10 @@ def expand_birthdate(payload):
     p = dict(payload)
     bd = p.pop("birthdate", None)
     if bd:
-        y, m, d = (int(x) for x in bd.split("-"))
+        try:
+            y, m, d = (int(x) for x in bd.split("-"))
+        except ValueError:
+            fail("invalid birthdate %r: expected YYYY-MM-DD" % bd)
         p.update(is_birthdate_known=True, birthdate_day=d, birthdate_month=m,
                  birthdate_year=y, birthdate_is_age_based=False)
     p.setdefault("is_birthdate_known", False)
@@ -155,7 +165,11 @@ def build_update_body(current, user_json, get_genders):
     body.update(user_json)
     body = expand_birthdate(body)
     if "gender_id" not in user_json and current.get("gender"):
-        body["gender_id"] = resolve_gender_id(get_genders(), current["gender"])
+        name = current["gender"]
+        gender_id = resolve_gender_id(get_genders(), name)
+        if gender_id is None and name:
+            sys.stderr.write("warning: could not resolve gender %r; it will be cleared by this update\n" % name)
+        body["gender_id"] = gender_id
     return body
 
 def ref_lookup(cfg, kind, refresh=False):
@@ -200,11 +214,11 @@ def cmd_contacts(cfg, args):
     elif args.action == "get":
         out(request(cfg, "GET", "contacts/%d" % args.id)["data"])
     elif args.action == "create":
-        body = expand_birthdate(json.loads(args.json))
+        body = expand_birthdate(parse_json_arg(args.json))
         out(request(cfg, "POST", "contacts", body=body)["data"])
     elif args.action == "update":
         current = request(cfg, "GET", "contacts/%d" % args.id)["data"]
-        body = build_update_body(current, json.loads(args.json),
+        body = build_update_body(current, parse_json_arg(args.json),
                                  lambda: paginate(cfg, "genders"))
         out(request(cfg, "PUT", "contacts/%d" % args.id, body=body)["data"])
     elif args.action == "delete":
@@ -226,7 +240,7 @@ def cmd_fields(cfg, args):
 
 def cmd_addresses(cfg, args):
     if args.action == "add":
-        body = json.loads(args.json); body["contact_id"] = args.contact
+        body = parse_json_arg(args.json); body["contact_id"] = args.contact
         out(request(cfg, "POST", "addresses", body=body)["data"])
     elif args.action == "list":
         out(request(cfg, "GET", "contacts/%d/addresses" % args.contact)["data"])
@@ -236,7 +250,7 @@ def cmd_addresses(cfg, args):
                 "street": current.get("street"), "city": current.get("city"),
                 "province": current.get("province"), "postal_code": current.get("postal_code"),
                 "country": (current.get("country") or {}).get("iso")}
-        body.update(json.loads(args.json))
+        body.update(parse_json_arg(args.json))
         out(request(cfg, "PUT", "addresses/%d" % args.address_id, body=body)["data"])
     elif args.action == "remove":
         out(request(cfg, "DELETE", "addresses/%d" % args.address_id))
@@ -265,12 +279,16 @@ def cmd_notes(cfg, args):
     elif args.action == "delete":
         out(request(cfg, "DELETE", "notes/%d" % args.note_id))
 
+def parse_tag_list(s):
+    """Split a comma-separated --tags argument into trimmed, non-empty tag names."""
+    return [t.strip() for t in s.split(",") if t.strip()]
+
 def cmd_tags(cfg, args):
     if args.action == "list":
         out(paginate(cfg, "tags"))
     elif args.action == "set":
         out(request(cfg, "POST", "contacts/%d/setTags" % args.contact,
-                    body={"tags": args.tags.split(",")})["data"])
+                    body={"tags": parse_tag_list(args.tags)})["data"])
     elif args.action == "unset":
         # Live-verified against the running Monica v4 instance: unsetTag rejects a bare
         # "tag_id" int (422 "The tags field is required." / "The tag id must be an

@@ -1,8 +1,13 @@
-import json, os, tempfile, unittest
+import importlib.util
+import io, json, os, tempfile, unittest
+from contextlib import redirect_stderr
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
-monica = SourceFileLoader("monica", str(Path(__file__).parent / "monica")).load_module()
+_path = str(Path(__file__).parent / "monica")
+_spec = importlib.util.spec_from_file_location("monica", _path, loader=SourceFileLoader("monica", _path))
+monica = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(monica)
 
 class ConfigTest(unittest.TestCase):
     def test_env_file_parsing_and_env_override(self):
@@ -18,6 +23,29 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(cfg["MONICA_API_TOKEN"], "envtoken")                # env wins
         finally:
             os.environ.clear(); os.environ.update(old); os.unlink(path)
+
+class InputValidationTest(unittest.TestCase):
+    def test_parse_json_arg_invalid_json_fails_cleanly(self):
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            with self.assertRaises(SystemExit) as cm:
+                monica.parse_json_arg("{not valid json")
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("invalid JSON in --json argument", buf.getvalue())
+
+    def test_parse_json_arg_valid_json_passes_through(self):
+        self.assertEqual(monica.parse_json_arg('{"a": 1}'), {"a": 1})
+
+    def test_expand_birthdate_invalid_date_fails_cleanly(self):
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            with self.assertRaises(SystemExit) as cm:
+                monica.expand_birthdate({"first_name": "A", "birthdate": "not-a-date"})
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("invalid birthdate", buf.getvalue())
+
+    def test_parse_tag_list_strips_and_drops_empty(self):
+        self.assertEqual(monica.parse_tag_list("a, b ,, c "), ["a", "b", "c"])
 
 class PayloadTest(unittest.TestCase):
     def test_expand_birthdate_shorthand(self):
@@ -81,6 +109,14 @@ class PayloadTest(unittest.TestCase):
             raise AssertionError("genders fetched despite explicit null gender_id")
         body = monica.build_update_body(self._current(), {"gender_id": None}, boom)
         self.assertIsNone(body["gender_id"])   # clear-intent passes through untouched
+
+    def test_build_update_body_gender_resolve_miss_warns(self):
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            body = monica.build_update_body(self._current(), {},
+                                            lambda: [{"id": 1, "name": "Man"}])
+        self.assertIsNone(body["gender_id"])
+        self.assertIn("could not resolve gender", buf.getvalue())
 
 class RefCacheTest(unittest.TestCase):
     CFG = {"MONICA_API_URL": "https://crm.example:8443/api", "MONICA_API_TOKEN": "t"}
