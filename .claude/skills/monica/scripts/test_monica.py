@@ -1,4 +1,4 @@
-import os, tempfile, unittest
+import json, os, tempfile, unittest
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
@@ -81,6 +81,56 @@ class PayloadTest(unittest.TestCase):
             raise AssertionError("genders fetched despite explicit null gender_id")
         body = monica.build_update_body(self._current(), {"gender_id": None}, boom)
         self.assertIsNone(body["gender_id"])   # clear-intent passes through untouched
+
+class RefCacheTest(unittest.TestCase):
+    CFG = {"MONICA_API_URL": "https://crm.example:8443/api", "MONICA_API_TOKEN": "t"}
+    FIXTURE = [{"id": 1, "name": "Man"}, {"id": 2, "name": "Woman"}]
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._orig_cache_dir = monica.CACHE_DIR
+        self._orig_paginate = monica.paginate
+        monica.CACHE_DIR = Path(self._tmpdir.name)
+        self.calls = []
+        def fake_paginate(cfg, path, params=None):
+            self.calls.append(path)
+            return list(self.FIXTURE)
+        monica.paginate = fake_paginate
+
+    def tearDown(self):
+        monica.CACHE_DIR = self._orig_cache_dir
+        monica.paginate = self._orig_paginate
+        self._tmpdir.cleanup()
+
+    def _cache_file(self, kind):
+        return Path(self._tmpdir.name) / ("crm.example_8443-%s.json" % kind)
+
+    def test_first_call_fetches_and_writes_cache(self):
+        items = monica.ref_lookup(self.CFG, "genders")
+        self.assertEqual(items, self.FIXTURE)
+        self.assertEqual(self.calls, ["genders"])
+        self.assertTrue(self._cache_file("genders").exists())
+        self.assertEqual(json.loads(self._cache_file("genders").read_text()), self.FIXTURE)
+
+    def test_second_call_reads_cache_without_fetching(self):
+        monica.ref_lookup(self.CFG, "genders")
+        def boom(cfg, path, params=None):
+            raise AssertionError("paginate called despite valid cache")
+        monica.paginate = boom
+        self.assertEqual(monica.ref_lookup(self.CFG, "genders"), self.FIXTURE)
+
+    def test_corrupt_cache_falls_back_and_repairs(self):
+        self._cache_file("genders").write_text("not json")
+        items = monica.ref_lookup(self.CFG, "genders")
+        self.assertEqual(items, self.FIXTURE)                       # no traceback, refetched
+        self.assertEqual(self.calls, ["genders"])
+        self.assertEqual(json.loads(self._cache_file("genders").read_text()),
+                         self.FIXTURE)                              # cache repaired
+
+    def test_refresh_bypasses_valid_cache(self):
+        monica.ref_lookup(self.CFG, "genders")
+        monica.ref_lookup(self.CFG, "genders", refresh=True)
+        self.assertEqual(self.calls, ["genders", "genders"])        # fetched twice
 
 if __name__ == "__main__":
     unittest.main()

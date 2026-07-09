@@ -162,10 +162,15 @@ def ref_lookup(cfg, kind, refresh=False):
     host = urllib.parse.urlparse(cfg["MONICA_API_URL"]).netloc.replace(":", "_")
     cache = CACHE_DIR / ("%s-%s.json" % (host, kind))
     if cache.exists() and not refresh:
-        return json.loads(cache.read_text())
+        try:
+            return json.loads(cache.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass  # corrupt/unreadable cache: fall through to a fresh fetch that rewrites it
     items = paginate(cfg, REF_PATHS[kind])
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps(items))
+    tmp = cache.with_suffix(".tmp")
+    tmp.write_text(json.dumps(items))
+    os.replace(tmp, cache)
     return items
 
 def cmd_ref(cfg, args):
