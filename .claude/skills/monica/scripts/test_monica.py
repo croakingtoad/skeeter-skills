@@ -44,8 +44,8 @@ class PayloadTest(unittest.TestCase):
         self.assertEqual(p["birthdate_year"], 1980)
         self.assertEqual(p["is_deceased_date_known"], False)
         # ContactResource exposes only the gender NAME, never gender_id;
-        # the mapping must leave gender_id unset (resolution happens in the command layer).
-        self.assertIsNone(p.get("gender_id"))
+        # the mapping leaves gender_id out entirely (resolution happens in the command layer).
+        self.assertNotIn("gender_id", p)
 
     def test_resolve_gender_id(self):
         genders = [{"id": 1, "name": "Man", "type": "M"},
@@ -55,6 +55,32 @@ class PayloadTest(unittest.TestCase):
         self.assertEqual(monica.resolve_gender_id(genders, "woman"), 2)   # case-insensitive
         self.assertIsNone(monica.resolve_gender_id(genders, "Nonexistent"))
         self.assertIsNone(monica.resolve_gender_id(genders, None))
+
+    GENDERS = [{"id": 1, "name": "Man"}, {"id": 2, "name": "Woman"}]
+
+    def _current(self):  # minimal gendered ContactResource shape
+        return {"id": 7, "first_name": "Ann", "last_name": "Lee", "nickname": None,
+                "gender": "Woman", "description": None, "is_dead": False,
+                "information": {"dates": {"birthdate": {"date": None},
+                                          "deceased_date": {"date": None}}}}
+
+    def test_build_update_body_gender_omitted_resolves(self):
+        body = monica.build_update_body(self._current(), {"nickname": "Zed"},
+                                        lambda: self.GENDERS)
+        self.assertEqual(body["gender_id"], 2)
+        self.assertEqual(body["nickname"], "Zed")
+
+    def test_build_update_body_explicit_gender_respected(self):
+        def boom():  # explicit gender_id must not trigger a genders fetch
+            raise AssertionError("genders fetched despite explicit gender_id")
+        body = monica.build_update_body(self._current(), {"gender_id": 1}, boom)
+        self.assertEqual(body["gender_id"], 1)
+
+    def test_build_update_body_explicit_null_gender_respected(self):
+        def boom():
+            raise AssertionError("genders fetched despite explicit null gender_id")
+        body = monica.build_update_body(self._current(), {"gender_id": None}, boom)
+        self.assertIsNone(body["gender_id"])   # clear-intent passes through untouched
 
 if __name__ == "__main__":
     unittest.main()

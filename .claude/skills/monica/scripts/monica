@@ -114,7 +114,6 @@ def contact_to_update_payload(c):
         "middle_name": c.get("middle_name"),
         "last_name": c.get("last_name"),
         "nickname": c.get("nickname"),
-        "gender_id": c.get("gender_id") or info.get("gender_id"),
         "description": c.get("description"),
         "is_birthdate_known": bool(bd),
         "is_deceased": bool(c.get("is_dead")),
@@ -141,6 +140,21 @@ def resolve_gender_id(genders, name):
         if g.get("name", "").lower() == name.lower():
             return g["id"]
     return None
+
+def build_update_body(current, user_json, get_genders):
+    """Merge a GET /contacts/{id} resource with the user's partial update JSON.
+
+    Gender: the resource never carries gender_id, so if the USER'S JSON omits the
+    key entirely and the contact has a gender name, resolve it via get_genders()
+    (callable returning a GET /genders data list). An explicit gender_id in the
+    user's JSON — including null (clear-intent) — is respected as-is.
+    """
+    body = contact_to_update_payload(current)
+    body.update(user_json)
+    body = expand_birthdate(body)
+    if "gender_id" not in user_json and current.get("gender"):
+        body["gender_id"] = resolve_gender_id(get_genders(), current["gender"])
+    return body
 
 def cmd_whoami(cfg, args):
     out(request(cfg, "GET", "me")["data"])
@@ -170,11 +184,8 @@ def cmd_contacts(cfg, args):
         out(request(cfg, "POST", "contacts", body=body)["data"])
     elif args.action == "update":
         current = request(cfg, "GET", "contacts/%d" % args.id)["data"]
-        body = contact_to_update_payload(current)
-        body.update(json.loads(args.json))
-        body = expand_birthdate(body)
-        if not body.get("gender_id") and current.get("gender"):
-            body["gender_id"] = resolve_gender_id(paginate(cfg, "genders"), current["gender"])
+        body = build_update_body(current, json.loads(args.json),
+                                 lambda: paginate(cfg, "genders"))
         out(request(cfg, "PUT", "contacts/%d" % args.id, body=body)["data"])
     elif args.action == "delete":
         out(request(cfg, "DELETE", "contacts/%d" % args.id))
