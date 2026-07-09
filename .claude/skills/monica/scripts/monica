@@ -257,6 +257,52 @@ def cmd_rel(cfg, args):
     elif args.action == "unlink":
         out(request(cfg, "DELETE", "relationships/%d" % args.rel_id))
 
+def cmd_notes(cfg, args):
+    if args.action == "add":
+        out(request(cfg, "POST", "notes", body={"contact_id": args.contact, "body": args.text})["data"])
+    elif args.action == "list":
+        out(request(cfg, "GET", "contacts/%d/notes" % args.contact)["data"])
+    elif args.action == "delete":
+        out(request(cfg, "DELETE", "notes/%d" % args.note_id))
+
+def cmd_tags(cfg, args):
+    if args.action == "list":
+        out(paginate(cfg, "tags"))
+    elif args.action == "set":
+        out(request(cfg, "POST", "contacts/%d/setTags" % args.contact,
+                    body={"tags": args.tags.split(",")})["data"])
+    elif args.action == "unset":
+        # Live-verified against the running Monica v4 instance: unsetTag rejects a bare
+        # "tag_id" int (422 "The tags field is required." / "The tag id must be an
+        # integer.") and only accepts {"tags": [<tag_id int>]}.
+        out(request(cfg, "POST", "contacts/%d/unsetTag" % args.contact,
+                    body={"tags": [find_tag_id(cfg, args.tag)]})["data"])
+
+def cmd_reminders(cfg, args):
+    if args.action == "add":
+        out(request(cfg, "POST", "reminders", body={
+            "contact_id": args.contact, "title": args.title, "initial_date": args.date,
+            "frequency_type": args.frequency, "frequency_number": 1})["data"])
+    elif args.action == "list":
+        out(request(cfg, "GET", "contacts/%d/reminders" % args.contact)["data"])
+    elif args.action == "delete":
+        out(request(cfg, "DELETE", "reminders/%d" % args.reminder_id))
+
+def cmd_tasks(cfg, args):
+    if args.action == "add":
+        out(request(cfg, "POST", "tasks", body={
+            "contact_id": args.contact, "title": args.title, "completed": 0})["data"])
+    elif args.action == "done":
+        t = request(cfg, "GET", "tasks/%d" % args.task_id)["data"]
+        out(request(cfg, "PUT", "tasks/%d" % args.task_id, body={
+            "contact_id": t["contact"]["id"] if t.get("contact") else None,
+            "title": t["title"], "description": t.get("description"),
+            "completed": 1})["data"])
+    elif args.action == "list":
+        out(request(cfg, "GET", "contacts/%d/tasks" % args.contact)["data"])
+    elif args.action == "delete":
+        out(request(cfg, "DELETE", "tasks/%d" % args.task_id))
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="monica", description=__doc__)
     sub = p.add_subparsers(dest="resource", required=True)
@@ -294,6 +340,29 @@ def main(argv=None):
     rk = relsub.add_parser("link"); rk.add_argument("contact", type=int)
     rk.add_argument("--type", required=True); rk.add_argument("--to", type=int, required=True)
     ru = relsub.add_parser("unlink"); ru.add_argument("rel_id", type=int)
+    n = sub.add_parser("notes", help="note operations")
+    nsub = n.add_subparsers(dest="action", required=True)
+    na = nsub.add_parser("add"); na.add_argument("contact", type=int); na.add_argument("text")
+    nl = nsub.add_parser("list"); nl.add_argument("contact", type=int)
+    nd = nsub.add_parser("delete"); nd.add_argument("note_id", type=int)
+    t = sub.add_parser("tags", help="tag operations")
+    tsub = t.add_subparsers(dest="action", required=True)
+    tsub.add_parser("list")
+    ts = tsub.add_parser("set"); ts.add_argument("contact", type=int); ts.add_argument("tags")
+    tu = tsub.add_parser("unset"); tu.add_argument("contact", type=int); tu.add_argument("tag")
+    rem = sub.add_parser("reminders", help="reminder operations")
+    remsub = rem.add_subparsers(dest="action", required=True)
+    rema = remsub.add_parser("add"); rema.add_argument("contact", type=int)
+    rema.add_argument("--title", required=True); rema.add_argument("--date", required=True)
+    rema.add_argument("--frequency", choices=["one_time", "week", "month", "year"], default="one_time")
+    reml = remsub.add_parser("list"); reml.add_argument("contact", type=int)
+    remd = remsub.add_parser("delete"); remd.add_argument("reminder_id", type=int)
+    tk = sub.add_parser("tasks", help="task operations")
+    tksub = tk.add_subparsers(dest="action", required=True)
+    tka = tksub.add_parser("add"); tka.add_argument("contact", type=int); tka.add_argument("--title", required=True)
+    tkdo = tksub.add_parser("done"); tkdo.add_argument("task_id", type=int)
+    tkl = tksub.add_parser("list"); tkl.add_argument("contact", type=int)
+    tkd = tksub.add_parser("delete"); tkd.add_argument("task_id", type=int)
     args = p.parse_args(argv)
     cfg = load_config()
     if not cfg.get("MONICA_API_URL") or not cfg.get("MONICA_API_TOKEN"):
@@ -301,7 +370,8 @@ def main(argv=None):
     HANDLERS[args.resource](cfg, args)
 
 HANDLERS = {"whoami": cmd_whoami, "contacts": cmd_contacts, "ref": cmd_ref,
-            "fields": cmd_fields, "addresses": cmd_addresses, "rel": cmd_rel}
+            "fields": cmd_fields, "addresses": cmd_addresses, "rel": cmd_rel,
+            "notes": cmd_notes, "tags": cmd_tags, "reminders": cmd_reminders, "tasks": cmd_tasks}
 
 if __name__ == "__main__":
     main()
