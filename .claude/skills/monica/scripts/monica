@@ -277,6 +277,8 @@ def cmd_tags(cfg, args):
         # integer.") and only accepts {"tags": [<tag_id int>]}.
         out(request(cfg, "POST", "contacts/%d/unsetTag" % args.contact,
                     body={"tags": [find_tag_id(cfg, args.tag)]})["data"])
+    elif args.action == "delete":
+        out(request(cfg, "DELETE", "tags/%d" % args.tag_id))
 
 def cmd_reminders(cfg, args):
     if args.action == "add":
@@ -350,6 +352,7 @@ def main(argv=None):
     tsub.add_parser("list")
     ts = tsub.add_parser("set"); ts.add_argument("contact", type=int); ts.add_argument("tags")
     tu = tsub.add_parser("unset"); tu.add_argument("contact", type=int); tu.add_argument("tag")
+    td = tsub.add_parser("delete"); td.add_argument("tag_id", type=int)
     rem = sub.add_parser("reminders", help="reminder operations")
     remsub = rem.add_subparsers(dest="action", required=True)
     rema = remsub.add_parser("add"); rema.add_argument("contact", type=int)

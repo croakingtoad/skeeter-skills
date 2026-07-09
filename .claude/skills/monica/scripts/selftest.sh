@@ -26,5 +26,22 @@ step "$S" rel unlink "$REL"
 step "$S" tags unset "$A" zzz-selftest
 step "$S" contacts delete "$A"
 step "$S" contacts delete "$B"
+
+# Unstepped cleanup: remove the zzz-selftest tag object itself (tags set creates it;
+# unsetTag only detaches it from the contact, leaving an orphaned tag row).
+TID=$("$S" tags list 2>/dev/null | python3 -c 'import json,sys
+for t in json.load(sys.stdin):
+    if t.get("name") == "zzz-selftest":
+        print(t["id"]); break')
+if [ -n "$TID" ]; then
+  if "$S" tags delete "$TID" >/dev/null 2>&1; then
+    echo "tag cleanup: ok"
+  else
+    echo "WARN: zzz-selftest tag left behind (id $TID)"
+  fi
+else
+  echo "tag cleanup: ok"
+fi
+
 echo "----"; echo "PASS=$pass FAIL=$failn"
 [ "$failn" -eq 0 ]
