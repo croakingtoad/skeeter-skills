@@ -30,7 +30,7 @@ class PayloadTest(unittest.TestCase):
     def test_contact_to_update_payload_round_trip(self):
         contact = {  # shape of GET /contacts/{id} data (ContactResource)
             "id": 7, "first_name": "Ann", "last_name": "Lee", "nickname": None,
-            "gender_type": None, "description": None,
+            "gender": "Woman", "gender_type": None, "description": None,
             "information": {
                 "dates": {"birthdate": {"date": "1980-03-15T00:00:00Z", "is_age_based": False,
                                         "is_year_unknown": False},
@@ -43,6 +43,18 @@ class PayloadTest(unittest.TestCase):
         self.assertEqual(p["is_birthdate_known"], True)
         self.assertEqual(p["birthdate_year"], 1980)
         self.assertEqual(p["is_deceased_date_known"], False)
+        # ContactResource exposes only the gender NAME, never gender_id;
+        # the mapping must leave gender_id unset (resolution happens in the command layer).
+        self.assertIsNone(p.get("gender_id"))
+
+    def test_resolve_gender_id(self):
+        genders = [{"id": 1, "name": "Man", "type": "M"},
+                   {"id": 2, "name": "Woman", "type": "F"},
+                   {"id": 3, "name": "Rather not say", "type": "O"}]
+        self.assertEqual(monica.resolve_gender_id(genders, "Woman"), 2)
+        self.assertEqual(monica.resolve_gender_id(genders, "woman"), 2)   # case-insensitive
+        self.assertIsNone(monica.resolve_gender_id(genders, "Nonexistent"))
+        self.assertIsNone(monica.resolve_gender_id(genders, None))
 
 if __name__ == "__main__":
     unittest.main()

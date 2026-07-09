@@ -129,6 +129,19 @@ def contact_to_update_payload(c):
                  deceased_date_year=dd["year"])
     return p
 
+def resolve_gender_id(genders, name):
+    """Case-insensitive gender name -> id lookup over a GET /genders data list.
+
+    ContactResource exposes only the gender NAME (never gender_id), so the update
+    command must resolve it back to an id or the full-payload PUT would null it.
+    """
+    if not name:
+        return None
+    for g in genders:
+        if g.get("name", "").lower() == name.lower():
+            return g["id"]
+    return None
+
 def cmd_whoami(cfg, args):
     out(request(cfg, "GET", "me")["data"])
 
@@ -160,6 +173,8 @@ def cmd_contacts(cfg, args):
         body = contact_to_update_payload(current)
         body.update(json.loads(args.json))
         body = expand_birthdate(body)
+        if not body.get("gender_id") and current.get("gender"):
+            body["gender_id"] = resolve_gender_id(paginate(cfg, "genders"), current["gender"])
         out(request(cfg, "PUT", "contacts/%d" % args.id, body=body)["data"])
     elif args.action == "delete":
         out(request(cfg, "DELETE", "contacts/%d" % args.id))
