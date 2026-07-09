@@ -241,6 +241,22 @@ def cmd_addresses(cfg, args):
     elif args.action == "remove":
         out(request(cfg, "DELETE", "addresses/%d" % args.address_id))
 
+def cmd_rel(cfg, args):
+    if args.action == "types":
+        out(ref_lookup(cfg, "reltypes"))
+    elif args.action == "list":
+        out(request(cfg, "GET", "contacts/%d/relationships" % args.contact)["data"])
+    elif args.action == "link":
+        types = ref_lookup(cfg, "reltypes")
+        match = [t for t in types if t["name"].lower() == args.type.lower()]
+        if not match:
+            fail("unknown relationship type %r; run: monica rel types" % args.type)
+        out(request(cfg, "POST", "relationships", body={
+            "contact_is": args.contact, "relationship_type_id": match[0]["id"],
+            "of_contact": args.to})["data"])
+    elif args.action == "unlink":
+        out(request(cfg, "DELETE", "relationships/%d" % args.rel_id))
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="monica", description=__doc__)
     sub = p.add_subparsers(dest="resource", required=True)
@@ -271,6 +287,13 @@ def main(argv=None):
     al = asub.add_parser("list"); al.add_argument("contact", type=int)
     au = asub.add_parser("update"); au.add_argument("address_id", type=int); au.add_argument("--json", required=True)
     ar = asub.add_parser("remove"); ar.add_argument("address_id", type=int)
+    rel = sub.add_parser("rel", help="relationship operations")
+    relsub = rel.add_subparsers(dest="action", required=True)
+    relsub.add_parser("types")
+    rl = relsub.add_parser("list"); rl.add_argument("contact", type=int)
+    rk = relsub.add_parser("link"); rk.add_argument("contact", type=int)
+    rk.add_argument("--type", required=True); rk.add_argument("--to", type=int, required=True)
+    ru = relsub.add_parser("unlink"); ru.add_argument("rel_id", type=int)
     args = p.parse_args(argv)
     cfg = load_config()
     if not cfg.get("MONICA_API_URL") or not cfg.get("MONICA_API_TOKEN"):
@@ -278,7 +301,7 @@ def main(argv=None):
     HANDLERS[args.resource](cfg, args)
 
 HANDLERS = {"whoami": cmd_whoami, "contacts": cmd_contacts, "ref": cmd_ref,
-            "fields": cmd_fields, "addresses": cmd_addresses}
+            "fields": cmd_fields, "addresses": cmd_addresses, "rel": cmd_rel}
 
 if __name__ == "__main__":
     main()
