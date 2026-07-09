@@ -8,6 +8,8 @@ import argparse, json, os, ssl, sys, urllib.error, urllib.parse, urllib.request
 from pathlib import Path
 
 CONFIG_FILE = Path.home() / ".config" / "monica-api" / ".env"
+CACHE_DIR = Path.home() / ".cache" / "monica-skill"
+REF_PATHS = {"genders": "genders", "fieldtypes": "contactfieldtypes", "reltypes": "relationshiptypes"}
 SETUP_MSG = """monica: not configured.
 Set MONICA_API_URL and MONICA_API_TOKEN (env vars, or KEY=VALUE lines in
 ~/.config/monica-api/.env, chmod 600). Get a token in Monica: Settings -> API.
@@ -156,6 +158,19 @@ def build_update_body(current, user_json, get_genders):
         body["gender_id"] = resolve_gender_id(get_genders(), current["gender"])
     return body
 
+def ref_lookup(cfg, kind, refresh=False):
+    host = urllib.parse.urlparse(cfg["MONICA_API_URL"]).netloc.replace(":", "_")
+    cache = CACHE_DIR / ("%s-%s.json" % (host, kind))
+    if cache.exists() and not refresh:
+        return json.loads(cache.read_text())
+    items = paginate(cfg, REF_PATHS[kind])
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps(items))
+    return items
+
+def cmd_ref(cfg, args):
+    out(ref_lookup(cfg, args.kind, refresh=args.refresh))
+
 def cmd_whoami(cfg, args):
     out(request(cfg, "GET", "me")["data"])
 
@@ -194,6 +209,9 @@ def main(argv=None):
     p = argparse.ArgumentParser(prog="monica", description=__doc__)
     sub = p.add_subparsers(dest="resource", required=True)
     sub.add_parser("whoami", help="current user + me_contact")
+    r = sub.add_parser("ref", help="reference data lookups")
+    r.add_argument("kind", choices=sorted(REF_PATHS))
+    r.add_argument("--refresh", action="store_true")
     c = sub.add_parser("contacts", help="contact operations")
     csub = c.add_subparsers(dest="action", required=True)
     s = csub.add_parser("search"); s.add_argument("query")
@@ -211,7 +229,7 @@ def main(argv=None):
         fail(SETUP_MSG, 2)
     HANDLERS[args.resource](cfg, args)
 
-HANDLERS = {"whoami": cmd_whoami, "contacts": cmd_contacts}
+HANDLERS = {"whoami": cmd_whoami, "contacts": cmd_contacts, "ref": cmd_ref}
 
 if __name__ == "__main__":
     main()
