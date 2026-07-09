@@ -78,6 +78,57 @@ def paginate(cfg, path, params=None):
 def out(obj):
     print(json.dumps(obj, ensure_ascii=False))
 
+# Full field set required by PUT /contacts/{id} (UpdateContact::rules() in Monica v4):
+# first_name(req), middle_name, last_name, nickname, gender_id, description,
+# is_birthdate_known(req) + birthdate_day/month/year + birthdate_is_age_based + birthdate_age,
+# is_deceased(req-ish), is_deceased_date_known(req) + deceased_date_day/month/year.
+# Omitted fields are WIPED — hence GET-merge-PUT.
+
+def expand_birthdate(payload):
+    """Accept birthdate: 'YYYY-MM-DD' shorthand and expand to Monica's composite params."""
+    p = dict(payload)
+    bd = p.pop("birthdate", None)
+    if bd:
+        y, m, d = (int(x) for x in bd.split("-"))
+        p.update(is_birthdate_known=True, birthdate_day=d, birthdate_month=m,
+                 birthdate_year=y, birthdate_is_age_based=False)
+    p.setdefault("is_birthdate_known", False)
+    p.setdefault("is_deceased", False)
+    p.setdefault("is_deceased_date_known", False)
+    return p
+
+def _date_parts(dateinfo):
+    date = (dateinfo or {}).get("date")
+    if not date:
+        return None
+    d = date[:10].split("-")
+    return {"year": int(d[0]), "month": int(d[1]), "day": int(d[2])}
+
+def contact_to_update_payload(c):
+    """Map GET /contacts/{id} resource back to the full PUT payload."""
+    info = c.get("information", {})
+    bd = _date_parts(info.get("dates", {}).get("birthdate"))
+    dd = _date_parts(info.get("dates", {}).get("deceased_date"))
+    p = {
+        "first_name": c.get("first_name"),
+        "middle_name": c.get("middle_name"),
+        "last_name": c.get("last_name"),
+        "nickname": c.get("nickname"),
+        "gender_id": c.get("gender_id") or info.get("gender_id"),
+        "description": c.get("description"),
+        "is_birthdate_known": bool(bd),
+        "is_deceased": bool(c.get("is_dead")),
+        "is_deceased_date_known": bool(dd),
+    }
+    if bd:
+        p.update(birthdate_day=bd["day"], birthdate_month=bd["month"],
+                 birthdate_year=bd["year"],
+                 birthdate_is_age_based=bool(info["dates"]["birthdate"].get("is_age_based")))
+    if dd:
+        p.update(deceased_date_day=dd["day"], deceased_date_month=dd["month"],
+                 deceased_date_year=dd["year"])
+    return p
+
 def cmd_whoami(cfg, args):
     out(request(cfg, "GET", "me")["data"])
 
@@ -101,6 +152,17 @@ def cmd_contacts(cfg, args):
             out(request(cfg, "GET", path, {"page": args.page})["data"])
     elif args.action == "get":
         out(request(cfg, "GET", "contacts/%d" % args.id)["data"])
+    elif args.action == "create":
+        body = expand_birthdate(json.loads(args.json))
+        out(request(cfg, "POST", "contacts", body=body)["data"])
+    elif args.action == "update":
+        current = request(cfg, "GET", "contacts/%d" % args.id)["data"]
+        body = contact_to_update_payload(current)
+        body.update(json.loads(args.json))
+        body = expand_birthdate(body)
+        out(request(cfg, "PUT", "contacts/%d" % args.id, body=body)["data"])
+    elif args.action == "delete":
+        out(request(cfg, "DELETE", "contacts/%d" % args.id))
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog="monica", description=__doc__)
@@ -114,6 +176,9 @@ def main(argv=None):
     l.add_argument("--tag"); l.add_argument("--page", type=int, default=1)
     l.add_argument("--all", action="store_true")
     g = csub.add_parser("get"); g.add_argument("id", type=int)
+    cr = csub.add_parser("create"); cr.add_argument("--json", required=True)
+    up = csub.add_parser("update"); up.add_argument("id", type=int); up.add_argument("--json", required=True)
+    de = csub.add_parser("delete"); de.add_argument("id", type=int)
     args = p.parse_args(argv)
     cfg = load_config()
     if not cfg.get("MONICA_API_URL") or not cfg.get("MONICA_API_TOKEN"):
