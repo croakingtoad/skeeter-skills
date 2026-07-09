@@ -18,6 +18,8 @@ Targets the **Monica v4 REST API** (Laravel Passport bearer auth) — any self-h
 .claude/skills/monica/
 ├── SKILL.md            # frontmatter (name: monica, trigger-rich description), tool table,
 │                       #   workflows, safety policy, setup instructions
+├── .env.example        # setup template (real creds go in ~/.config/monica-api/.env;
+│                       #   repo .gitignore blocks .env and **/.env as a safety net)
 ├── scripts/monica      # single executable Python 3 CLI — stdlib only, no pip deps
 ├── scripts/selftest.sh # live lifecycle smoke test (creates + removes "ZZZ Selftest" contact)
 ├── references/api.md   # endpoint payloads, quirk details, error-code table
@@ -32,7 +34,7 @@ Resolution order:
 1. Env vars `MONICA_API_URL`, `MONICA_API_TOKEN`
 2. `~/.config/monica-api/.env` (KEY=VALUE lines; recommended, chmod 600)
 
-Optional: `MONICA_API_INSECURE=1` disables TLS verification (self-signed instances). SKILL.md documents setup: create a Personal Access Token in Monica → Settings → API, save both values to the env file. The CLI exits with a clear setup message when unconfigured.
+Optional: `MONICA_API_CA_BUNDLE=/path/to/ca.pem` for self-signed instances (verification stays on; there is deliberately no verification-off switch). SKILL.md documents setup: create a Personal Access Token in Monica → Settings → API, save both values to the env file. The CLI exits with a clear setup message when unconfigured.
 
 ## CLI surface (phase 1)
 
@@ -42,7 +44,8 @@ One command, `<resource> <action>` style. Output: compact JSON on stdout (agent-
 monica whoami                                     # user + me_contact id
 monica contacts search "<q>" | list [--tag T] [--page N|--all]
 monica contacts get <id> | create --json '{...}' | update <id> --json '{...}'
-monica contacts archive <id> | unarchive <id> | delete <id>
+monica contacts delete <id>      # archiving is NOT exposed by the v4 API (web-only);
+                                 # SKILL.md says so and directs archive requests to the web UI
 monica fields add <contact> --type <email|phone|...> --value <v> | remove <field-id>
 monica addresses add <contact> --json '{...}' | update <addr-id> --json | remove <addr-id>
 monica rel link <contact> --type <type> --to <contact> | unlink <rel-id> | types

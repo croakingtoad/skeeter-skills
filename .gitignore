@@ -1,2 +1,4 @@
 .todos/
 .sidecar/
+.env
+**/.env
