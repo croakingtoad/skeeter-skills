@@ -1,0 +1,398 @@
+#!/usr/bin/env python3
+"""monica — CLI for the Monica CRM v4 REST API. Stdlib only.
+
+Config: env vars MONICA_API_URL / MONICA_API_TOKEN, else ~/.config/monica-api/.env
+Output: JSON on stdout. Errors on stderr; exit 1 = API error, 2 = not configured.
+"""
+import argparse, json, os, ssl, sys, urllib.error, urllib.parse, urllib.request
+from pathlib import Path
+
+CONFIG_FILE = Path.home() / ".config" / "monica-api" / ".env"
+CACHE_DIR = Path.home() / ".cache" / "monica-skill"
+REF_PATHS = {"genders": "genders", "fieldtypes": "contactfieldtypes", "reltypes": "relationshiptypes"}
+SETUP_MSG = """monica: not configured.
+Set MONICA_API_URL and MONICA_API_TOKEN (env vars, or KEY=VALUE lines in
+~/.config/monica-api/.env, chmod 600). Get a token in Monica: Settings -> API.
+See .env.example in this skill directory."""
+
+def load_config(config_file=CONFIG_FILE):
+    cfg = {}
+    if Path(config_file).exists():
+        for line in Path(config_file).read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                cfg[k.strip()] = v.strip()
+    for k in ("MONICA_API_URL", "MONICA_API_TOKEN", "MONICA_API_CA_BUNDLE"):
+        if os.environ.get(k):
+            cfg[k] = os.environ[k]
+    return cfg
+
+def fail(msg, code=1):
+    sys.stderr.write(msg.rstrip() + "\n")
+    sys.exit(code)
+
+def request(cfg, method, path, params=None, body=None):
+    url = cfg["MONICA_API_URL"].rstrip("/") + "/" + path.lstrip("/")
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers={
+        "Authorization": "Bearer " + cfg["MONICA_API_TOKEN"],
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    })
+    # TLS verification always on; self-signed instances supply their CA via MONICA_API_CA_BUNDLE
+    ctx = ssl.create_default_context(cafile=cfg["MONICA_API_CA_BUNDLE"]) if cfg.get("MONICA_API_CA_BUNDLE") else None
+    try:
+        with urllib.request.urlopen(req, context=ctx) as r:
+            raw = r.read()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        try:
+            err = json.loads(e.read())
+        except Exception:
+            err = {}
+        detail = err.get("error", {}) if isinstance(err.get("error"), dict) else {}
+        code = detail.get("error_code")
+        msg = detail.get("message") or err.get("message") or str(e.reason)
+        if isinstance(err.get("errors"), dict):        # 422 validation detail
+            msg += " " + json.dumps(err["errors"], ensure_ascii=False)
+        if e.code == 429:
+            msg += " (rate limited — wait a minute and retry)"
+        fail("HTTP %d%s: %s" % (e.code, " [monica error %s]" % code if code else "", msg))
+    except urllib.error.URLError as e:
+        fail("connection error: %s" % e.reason)
+
+def paginate(cfg, path, params=None):
+    """Follow meta.last_page; return concatenated data list."""
+    params = dict(params or {})
+    items, page = [], 1
+    while True:
+        params["page"] = page
+        resp = request(cfg, "GET", path, params)
+        items.extend(resp.get("data", []))
+        meta = resp.get("meta", {})
+        if page >= meta.get("last_page", 1):
+            return items
+        page += 1
+
+def out(obj):
+    print(json.dumps(obj, ensure_ascii=False))
+
+def parse_json_arg(s):
+    """Parse a user-supplied --json argument; exit cleanly (no traceback) on bad input."""
+    try:
+        return json.loads(s)
+    except ValueError as e:
+        fail("invalid JSON in --json argument: %s" % e)
+
+# Full field set required by PUT /contacts/{id} (UpdateContact::rules() in Monica v4):
+# first_name(req), middle_name, last_name, nickname, gender_id, description,
+# is_birthdate_known(req) + birthdate_day/month/year + birthdate_is_age_based + birthdate_age,
+# is_deceased(req-ish), is_deceased_date_known(req) + deceased_date_day/month/year.
+# Omitted fields are WIPED — hence GET-merge-PUT.
+
+def expand_birthdate(payload):
+    """Accept birthdate: 'YYYY-MM-DD' shorthand and expand to Monica's composite params."""
+    p = dict(payload)
+    bd = p.pop("birthdate", None)
+    if bd:
+        try:
+            y, m, d = (int(x) for x in bd.split("-"))
+        except ValueError:
+            fail("invalid birthdate %r: expected YYYY-MM-DD" % bd)
+        p.update(is_birthdate_known=True, birthdate_day=d, birthdate_month=m,
+                 birthdate_year=y, birthdate_is_age_based=False)
+    p.setdefault("is_birthdate_known", False)
+    p.setdefault("is_deceased", False)
+    p.setdefault("is_deceased_date_known", False)
+    return p
+
+def _date_parts(dateinfo):
+    date = (dateinfo or {}).get("date")
+    if not date:
+        return None
+    d = date[:10].split("-")
+    return {"year": int(d[0]), "month": int(d[1]), "day": int(d[2])}
+
+def contact_to_update_payload(c):
+    """Map GET /contacts/{id} resource back to the full PUT payload."""
+    info = c.get("information", {})
+    bd = _date_parts(info.get("dates", {}).get("birthdate"))
+    dd = _date_parts(info.get("dates", {}).get("deceased_date"))
+    p = {
+        "first_name": c.get("first_name"),
+        "middle_name": c.get("middle_name"),
+        "last_name": c.get("last_name"),
+        "nickname": c.get("nickname"),
+        "description": c.get("description"),
+        "is_birthdate_known": bool(bd),
+        "is_deceased": bool(c.get("is_dead")),
+        "is_deceased_date_known": bool(dd),
+    }
+    if bd:
+        p.update(birthdate_day=bd["day"], birthdate_month=bd["month"],
+                 birthdate_year=bd["year"],
+                 birthdate_is_age_based=bool(info["dates"]["birthdate"].get("is_age_based")))
+    if dd:
+        p.update(deceased_date_day=dd["day"], deceased_date_month=dd["month"],
+                 deceased_date_year=dd["year"])
+    return p
+
+def resolve_gender_id(genders, name):
+    """Case-insensitive gender name -> id lookup over a GET /genders data list.
+
+    ContactResource exposes only the gender NAME (never gender_id), so the update
+    command must resolve it back to an id or the full-payload PUT would null it.
+    """
+    if not name:
+        return None
+    for g in genders:
+        if g.get("name", "").lower() == name.lower():
+            return g["id"]
+    return None
+
+def build_update_body(current, user_json, get_genders):
+    """Merge a GET /contacts/{id} resource with the user's partial update JSON.
+
+    Gender: the resource never carries gender_id, so if the USER'S JSON omits the
+    key entirely and the contact has a gender name, resolve it via get_genders()
+    (callable returning a GET /genders data list). An explicit gender_id in the
+    user's JSON — including null (clear-intent) — is respected as-is.
+    """
+    body = contact_to_update_payload(current)
+    body.update(user_json)
+    body = expand_birthdate(body)
+    if "gender_id" not in user_json and current.get("gender"):
+        name = current["gender"]
+        gender_id = resolve_gender_id(get_genders(), name)
+        if gender_id is None and name:
+            sys.stderr.write("warning: could not resolve gender %r; it will be cleared by this update\n" % name)
+        body["gender_id"] = gender_id
+    return body
+
+def ref_lookup(cfg, kind, refresh=False):
+    host = urllib.parse.urlparse(cfg["MONICA_API_URL"]).netloc.replace(":", "_")
+    cache = CACHE_DIR / ("%s-%s.json" % (host, kind))
+    if cache.exists() and not refresh:
+        try:
+            return json.loads(cache.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass  # corrupt/unreadable cache: fall through to a fresh fetch that rewrites it
+    items = paginate(cfg, REF_PATHS[kind])
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = cache.with_suffix(".tmp")
+    tmp.write_text(json.dumps(items))
+    os.replace(tmp, cache)
+    return items
+
+def cmd_ref(cfg, args):
+    out(ref_lookup(cfg, args.kind, refresh=args.refresh))
+
+def cmd_whoami(cfg, args):
+    out(request(cfg, "GET", "me")["data"])
+
+def find_tag_id(cfg, name):
+    for t in paginate(cfg, "tags"):
+        if t["name"].lower() == name.lower():
+            return t["id"]
+    fail("no tag named %r" % name)
+
+def cmd_contacts(cfg, args):
+    if args.action == "search":
+        out(request(cfg, "GET", "contacts", {"query": args.query, "limit": args.limit})["data"])
+    elif args.action == "list":
+        if args.tag:
+            path = "tags/%d/contacts" % find_tag_id(cfg, args.tag)
+        else:
+            path = "contacts"
+        if getattr(args, "all", False):
+            out(paginate(cfg, path))
+        else:
+            out(request(cfg, "GET", path, {"page": args.page})["data"])
+    elif args.action == "get":
+        out(request(cfg, "GET", "contacts/%d" % args.id)["data"])
+    elif args.action == "create":
+        body = expand_birthdate(parse_json_arg(args.json))
+        out(request(cfg, "POST", "contacts", body=body)["data"])
+    elif args.action == "update":
+        current = request(cfg, "GET", "contacts/%d" % args.id)["data"]
+        body = build_update_body(current, parse_json_arg(args.json),
+                                 lambda: paginate(cfg, "genders"))
+        out(request(cfg, "PUT", "contacts/%d" % args.id, body=body)["data"])
+    elif args.action == "delete":
+        out(request(cfg, "DELETE", "contacts/%d" % args.id))
+
+def cmd_fields(cfg, args):
+    if args.action == "add":
+        types = ref_lookup(cfg, "fieldtypes")
+        match = [t for t in types if t["type"] == args.type or t["name"].lower() == args.type.lower()]
+        if not match:
+            fail("unknown field type %r; run: monica ref fieldtypes" % args.type)
+        out(request(cfg, "POST", "contactfields", body={
+            "contact_id": args.contact, "contact_field_type_id": match[0]["id"],
+            "data": args.value})["data"])
+    elif args.action == "list":
+        out(request(cfg, "GET", "contacts/%d/contactfields" % args.contact)["data"])
+    elif args.action == "remove":
+        out(request(cfg, "DELETE", "contactfields/%d" % args.field_id))
+
+def cmd_addresses(cfg, args):
+    if args.action == "add":
+        body = parse_json_arg(args.json); body["contact_id"] = args.contact
+        out(request(cfg, "POST", "addresses", body=body)["data"])
+    elif args.action == "list":
+        out(request(cfg, "GET", "contacts/%d/addresses" % args.contact)["data"])
+    elif args.action == "update":
+        current = request(cfg, "GET", "addresses/%d" % args.address_id)["data"]
+        body = {"contact_id": current["contact"]["id"], "name": current.get("name"),
+                "street": current.get("street"), "city": current.get("city"),
+                "province": current.get("province"), "postal_code": current.get("postal_code"),
+                "country": (current.get("country") or {}).get("iso")}
+        body.update(parse_json_arg(args.json))
+        out(request(cfg, "PUT", "addresses/%d" % args.address_id, body=body)["data"])
+    elif args.action == "remove":
+        out(request(cfg, "DELETE", "addresses/%d" % args.address_id))
+
+def cmd_rel(cfg, args):
+    if args.action == "types":
+        out(ref_lookup(cfg, "reltypes"))
+    elif args.action == "list":
+        out(request(cfg, "GET", "contacts/%d/relationships" % args.contact)["data"])
+    elif args.action == "link":
+        types = ref_lookup(cfg, "reltypes")
+        match = [t for t in types if t["name"].lower() == args.type.lower()]
+        if not match:
+            fail("unknown relationship type %r; run: monica rel types" % args.type)
+        out(request(cfg, "POST", "relationships", body={
+            "contact_is": args.contact, "relationship_type_id": match[0]["id"],
+            "of_contact": args.to})["data"])
+    elif args.action == "unlink":
+        out(request(cfg, "DELETE", "relationships/%d" % args.rel_id))
+
+def cmd_notes(cfg, args):
+    if args.action == "add":
+        out(request(cfg, "POST", "notes", body={"contact_id": args.contact, "body": args.text})["data"])
+    elif args.action == "list":
+        out(request(cfg, "GET", "contacts/%d/notes" % args.contact)["data"])
+    elif args.action == "delete":
+        out(request(cfg, "DELETE", "notes/%d" % args.note_id))
+
+def parse_tag_list(s):
+    """Split a comma-separated --tags argument into trimmed, non-empty tag names."""
+    return [t.strip() for t in s.split(",") if t.strip()]
+
+def cmd_tags(cfg, args):
+    if args.action == "list":
+        out(paginate(cfg, "tags"))
+    elif args.action == "set":
+        out(request(cfg, "POST", "contacts/%d/setTags" % args.contact,
+                    body={"tags": parse_tag_list(args.tags)})["data"])
+    elif args.action == "unset":
+        # Live-verified against the running Monica v4 instance: unsetTag rejects a bare
+        # "tag_id" int (422 "The tags field is required." / "The tag id must be an
+        # integer.") and only accepts {"tags": [<tag_id int>]}.
+        out(request(cfg, "POST", "contacts/%d/unsetTag" % args.contact,
+                    body={"tags": [find_tag_id(cfg, args.tag)]})["data"])
+    elif args.action == "delete":
+        out(request(cfg, "DELETE", "tags/%d" % args.tag_id))
+
+def cmd_reminders(cfg, args):
+    if args.action == "add":
+        out(request(cfg, "POST", "reminders", body={
+            "contact_id": args.contact, "title": args.title, "initial_date": args.date,
+            "frequency_type": args.frequency, "frequency_number": 1})["data"])
+    elif args.action == "list":
+        out(request(cfg, "GET", "contacts/%d/reminders" % args.contact)["data"])
+    elif args.action == "delete":
+        out(request(cfg, "DELETE", "reminders/%d" % args.reminder_id))
+
+def cmd_tasks(cfg, args):
+    if args.action == "add":
+        out(request(cfg, "POST", "tasks", body={
+            "contact_id": args.contact, "title": args.title, "completed": 0})["data"])
+    elif args.action == "done":
+        t = request(cfg, "GET", "tasks/%d" % args.task_id)["data"]
+        out(request(cfg, "PUT", "tasks/%d" % args.task_id, body={
+            "contact_id": t["contact"]["id"] if t.get("contact") else None,
+            "title": t["title"], "description": t.get("description"),
+            "completed": 1})["data"])
+    elif args.action == "list":
+        out(request(cfg, "GET", "contacts/%d/tasks" % args.contact)["data"])
+    elif args.action == "delete":
+        out(request(cfg, "DELETE", "tasks/%d" % args.task_id))
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="monica", description=__doc__)
+    sub = p.add_subparsers(dest="resource", required=True)
+    sub.add_parser("whoami", help="current user + me_contact")
+    r = sub.add_parser("ref", help="reference data lookups")
+    r.add_argument("kind", choices=sorted(REF_PATHS))
+    r.add_argument("--refresh", action="store_true")
+    c = sub.add_parser("contacts", help="contact operations")
+    csub = c.add_subparsers(dest="action", required=True)
+    s = csub.add_parser("search"); s.add_argument("query")
+    s.add_argument("--limit", type=int, default=25)
+    l = csub.add_parser("list")
+    l.add_argument("--tag"); l.add_argument("--page", type=int, default=1)
+    l.add_argument("--all", action="store_true")
+    g = csub.add_parser("get"); g.add_argument("id", type=int)
+    cr = csub.add_parser("create"); cr.add_argument("--json", required=True)
+    up = csub.add_parser("update"); up.add_argument("id", type=int); up.add_argument("--json", required=True)
+    de = csub.add_parser("delete"); de.add_argument("id", type=int)
+    f = sub.add_parser("fields", help="contact field operations")
+    fsub = f.add_subparsers(dest="action", required=True)
+    fa = fsub.add_parser("add"); fa.add_argument("contact", type=int)
+    fa.add_argument("--type", required=True); fa.add_argument("--value", required=True)
+    fl = fsub.add_parser("list"); fl.add_argument("contact", type=int)
+    fr = fsub.add_parser("remove"); fr.add_argument("field_id", type=int)
+    a = sub.add_parser("addresses", help="address operations")
+    asub = a.add_subparsers(dest="action", required=True)
+    aa = asub.add_parser("add"); aa.add_argument("contact", type=int); aa.add_argument("--json", required=True)
+    al = asub.add_parser("list"); al.add_argument("contact", type=int)
+    au = asub.add_parser("update"); au.add_argument("address_id", type=int); au.add_argument("--json", required=True)
+    ar = asub.add_parser("remove"); ar.add_argument("address_id", type=int)
+    rel = sub.add_parser("rel", help="relationship operations")
+    relsub = rel.add_subparsers(dest="action", required=True)
+    relsub.add_parser("types")
+    rl = relsub.add_parser("list"); rl.add_argument("contact", type=int)
+    rk = relsub.add_parser("link"); rk.add_argument("contact", type=int)
+    rk.add_argument("--type", required=True); rk.add_argument("--to", type=int, required=True)
+    ru = relsub.add_parser("unlink"); ru.add_argument("rel_id", type=int)
+    n = sub.add_parser("notes", help="note operations")
+    nsub = n.add_subparsers(dest="action", required=True)
+    na = nsub.add_parser("add"); na.add_argument("contact", type=int); na.add_argument("text")
+    nl = nsub.add_parser("list"); nl.add_argument("contact", type=int)
+    nd = nsub.add_parser("delete"); nd.add_argument("note_id", type=int)
+    t = sub.add_parser("tags", help="tag operations")
+    tsub = t.add_subparsers(dest="action", required=True)
+    tsub.add_parser("list")
+    ts = tsub.add_parser("set"); ts.add_argument("contact", type=int); ts.add_argument("tags")
+    tu = tsub.add_parser("unset"); tu.add_argument("contact", type=int); tu.add_argument("tag")
+    td = tsub.add_parser("delete"); td.add_argument("tag_id", type=int)
+    rem = sub.add_parser("reminders", help="reminder operations")
+    remsub = rem.add_subparsers(dest="action", required=True)
+    rema = remsub.add_parser("add"); rema.add_argument("contact", type=int)
+    rema.add_argument("--title", required=True); rema.add_argument("--date", required=True)
+    rema.add_argument("--frequency", choices=["one_time", "week", "month", "year"], default="one_time")
+    reml = remsub.add_parser("list"); reml.add_argument("contact", type=int)
+    remd = remsub.add_parser("delete"); remd.add_argument("reminder_id", type=int)
+    tk = sub.add_parser("tasks", help="task operations")
+    tksub = tk.add_subparsers(dest="action", required=True)
+    tka = tksub.add_parser("add"); tka.add_argument("contact", type=int); tka.add_argument("--title", required=True)
+    tkdo = tksub.add_parser("done"); tkdo.add_argument("task_id", type=int)
+    tkl = tksub.add_parser("list"); tkl.add_argument("contact", type=int)
+    tkd = tksub.add_parser("delete"); tkd.add_argument("task_id", type=int)
+    args = p.parse_args(argv)
+    cfg = load_config()
+    if not cfg.get("MONICA_API_URL") or not cfg.get("MONICA_API_TOKEN"):
+        fail(SETUP_MSG, 2)
+    HANDLERS[args.resource](cfg, args)
+
+HANDLERS = {"whoami": cmd_whoami, "contacts": cmd_contacts, "ref": cmd_ref,
+            "fields": cmd_fields, "addresses": cmd_addresses, "rel": cmd_rel,
+            "notes": cmd_notes, "tags": cmd_tags, "reminders": cmd_reminders, "tasks": cmd_tasks}
+
+if __name__ == "__main__":
+    main()
