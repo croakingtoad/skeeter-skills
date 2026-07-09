@@ -67,7 +67,7 @@ monica ref genders | fieldtypes | reltypes        # lookup tables needed for val
 
 ## Safety policy (SKILL.md instructions to Claude)
 
-- Destructive actions (`contacts delete`, `notes delete`, `rel unlink`, etc.): show what will be deleted (name/content) and get the user's confirmation before executing. Prefer `archive` over `delete` for contacts.
+- Destructive actions (`contacts delete`, `notes delete`, `tags delete`, `rel unlink`, etc.): show what will be deleted (name/content) and get the user's confirmation before executing. Archiving is not API-exposed in v4, so there is no gentler alternative to offer — direct archive requests to the web UI.
 - Never print the token; never write it anywhere but the env file.
 
 ## Error handling
@@ -76,7 +76,7 @@ Non-2xx → stderr line: `HTTP <status> [monica error <code>]: <message>`, exit 
 
 ## Testing
 
-`scripts/selftest.sh` runs the full lifecycle against the configured instance: whoami → create "ZZZ Selftest" contact → add email field → note → tag → reminder → task → relationship to `me_contact` (skipped if unset) → archive → delete. Prints PASS/FAIL per step, leaves no residue. Run at build time and by any adopter to validate their setup.
+`scripts/selftest.sh` runs the full lifecycle against the configured instance: whoami → create two "ZZZ Selftest" contacts → update → email field → address → relationship between the two throwaways → note → tag → reminder → task → unlink → untag → delete both, then an unstepped cleanup that removes the selftest tag object. Prints PASS/FAIL per step (PASS=15 expected), leaves no residue. Run at build time and by any adopter to validate their setup.
 
 ## Phase 2 (recorded, not built)
 
