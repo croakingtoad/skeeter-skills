@@ -210,6 +210,37 @@ def cmd_contacts(cfg, args):
     elif args.action == "delete":
         out(request(cfg, "DELETE", "contacts/%d" % args.id))
 
+def cmd_fields(cfg, args):
+    if args.action == "add":
+        types = ref_lookup(cfg, "fieldtypes")
+        match = [t for t in types if t["type"] == args.type or t["name"].lower() == args.type.lower()]
+        if not match:
+            fail("unknown field type %r; run: monica ref fieldtypes" % args.type)
+        out(request(cfg, "POST", "contactfields", body={
+            "contact_id": args.contact, "contact_field_type_id": match[0]["id"],
+            "data": args.value})["data"])
+    elif args.action == "list":
+        out(request(cfg, "GET", "contacts/%d/contactfields" % args.contact)["data"])
+    elif args.action == "remove":
+        out(request(cfg, "DELETE", "contactfields/%d" % args.field_id))
+
+def cmd_addresses(cfg, args):
+    if args.action == "add":
+        body = json.loads(args.json); body["contact_id"] = args.contact
+        out(request(cfg, "POST", "addresses", body=body)["data"])
+    elif args.action == "list":
+        out(request(cfg, "GET", "contacts/%d/addresses" % args.contact)["data"])
+    elif args.action == "update":
+        current = request(cfg, "GET", "addresses/%d" % args.address_id)["data"]
+        body = {"contact_id": current["contact"]["id"], "name": current.get("name"),
+                "street": current.get("street"), "city": current.get("city"),
+                "province": current.get("province"), "postal_code": current.get("postal_code"),
+                "country": (current.get("country") or {}).get("iso")}
+        body.update(json.loads(args.json))
+        out(request(cfg, "PUT", "addresses/%d" % args.address_id, body=body)["data"])
+    elif args.action == "remove":
+        out(request(cfg, "DELETE", "addresses/%d" % args.address_id))
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="monica", description=__doc__)
     sub = p.add_subparsers(dest="resource", required=True)
@@ -228,13 +259,26 @@ def main(argv=None):
     cr = csub.add_parser("create"); cr.add_argument("--json", required=True)
     up = csub.add_parser("update"); up.add_argument("id", type=int); up.add_argument("--json", required=True)
     de = csub.add_parser("delete"); de.add_argument("id", type=int)
+    f = sub.add_parser("fields", help="contact field operations")
+    fsub = f.add_subparsers(dest="action", required=True)
+    fa = fsub.add_parser("add"); fa.add_argument("contact", type=int)
+    fa.add_argument("--type", required=True); fa.add_argument("--value", required=True)
+    fl = fsub.add_parser("list"); fl.add_argument("contact", type=int)
+    fr = fsub.add_parser("remove"); fr.add_argument("field_id", type=int)
+    a = sub.add_parser("addresses", help="address operations")
+    asub = a.add_subparsers(dest="action", required=True)
+    aa = asub.add_parser("add"); aa.add_argument("contact", type=int); aa.add_argument("--json", required=True)
+    al = asub.add_parser("list"); al.add_argument("contact", type=int)
+    au = asub.add_parser("update"); au.add_argument("address_id", type=int); au.add_argument("--json", required=True)
+    ar = asub.add_parser("remove"); ar.add_argument("address_id", type=int)
     args = p.parse_args(argv)
     cfg = load_config()
     if not cfg.get("MONICA_API_URL") or not cfg.get("MONICA_API_TOKEN"):
         fail(SETUP_MSG, 2)
     HANDLERS[args.resource](cfg, args)
 
-HANDLERS = {"whoami": cmd_whoami, "contacts": cmd_contacts, "ref": cmd_ref}
+HANDLERS = {"whoami": cmd_whoami, "contacts": cmd_contacts, "ref": cmd_ref,
+            "fields": cmd_fields, "addresses": cmd_addresses}
 
 if __name__ == "__main__":
     main()
