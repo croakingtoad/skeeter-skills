@@ -81,17 +81,46 @@ def out(obj):
 def cmd_whoami(cfg, args):
     out(request(cfg, "GET", "me")["data"])
 
+def find_tag_id(cfg, name):
+    for t in paginate(cfg, "tags"):
+        if t["name"].lower() == name.lower():
+            return t["id"]
+    fail("no tag named %r" % name)
+
+def cmd_contacts(cfg, args):
+    if args.action == "search":
+        out(request(cfg, "GET", "contacts", {"query": args.query, "limit": args.limit})["data"])
+    elif args.action == "list":
+        if args.tag:
+            path = "tags/%d/contacts" % find_tag_id(cfg, args.tag)
+        else:
+            path = "contacts"
+        if getattr(args, "all", False):
+            out(paginate(cfg, path))
+        else:
+            out(request(cfg, "GET", path, {"page": args.page})["data"])
+    elif args.action == "get":
+        out(request(cfg, "GET", "contacts/%d" % args.id)["data"])
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="monica", description=__doc__)
     sub = p.add_subparsers(dest="resource", required=True)
     sub.add_parser("whoami", help="current user + me_contact")
+    c = sub.add_parser("contacts", help="contact operations")
+    csub = c.add_subparsers(dest="action", required=True)
+    s = csub.add_parser("search"); s.add_argument("query")
+    s.add_argument("--limit", type=int, default=25)
+    l = csub.add_parser("list")
+    l.add_argument("--tag"); l.add_argument("--page", type=int, default=1)
+    l.add_argument("--all", action="store_true")
+    g = csub.add_parser("get"); g.add_argument("id", type=int)
     args = p.parse_args(argv)
     cfg = load_config()
     if not cfg.get("MONICA_API_URL") or not cfg.get("MONICA_API_TOKEN"):
         fail(SETUP_MSG, 2)
     HANDLERS[args.resource](cfg, args)
 
-HANDLERS = {"whoami": cmd_whoami}
+HANDLERS = {"whoami": cmd_whoami, "contacts": cmd_contacts}
 
 if __name__ == "__main__":
     main()
